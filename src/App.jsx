@@ -2,43 +2,46 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, X, ChevronLeft, Users, Truck, FileText, LayoutGrid,
   ArrowUpRight, ArrowDownRight, Camera, Trash2, Image as ImageIcon,
-  Phone, Package, Loader2, AlertCircle, Wallet, TrendingUp, CreditCard, Copy, Check, LogOut, Printer
+  Phone, Package, Loader2, AlertCircle, Wallet, TrendingUp, CreditCard, Copy, Check, LogOut, Printer, Download, Search, Pencil
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import AuthGate from "./AuthGate";
 
 /* ---------------------------------------------------------------
-  TOKENS — "Vault": private-ledger dark theme
+  TOKENS — "Obsidian Ledger" dark theme
   bg (obsidian): #0B0C10
-  ink (primary text, warm parchment): #F3EFE6
+  card (elevated surface): #15171E
+  card2 (secondary elevated / hover / gradient end): #1C1F28
+  ink (primary text, light): #F3EFE6
   muted: #938E80
-  amber (brand / CTA — antique gold foil): #C9A768
-  midnight (dark chrome — nav dock, ink-on-gold text): #1C1F28
+  gold (brand / CTA): #C9A768 · bright: #EAD09A · deep: #8C6F35
   emerald (receivable / money coming in): #3FBF8F
-  rust (payable / money going out): #C0605A
-  hairline: rgba(255,255,255,0.09)
-  card: #15171E
+  wine (payable / money going out): #C0605A
+  hairline: rgba(255,255,255,.08)
   Fonts: Vazirmatn (UI/Persian), JetBrains Mono (amounts / ledger tape)
 ----------------------------------------------------------------*/
 
 const T = {
   bg: "#0B0C10",
+  card: "#15171E",
+  card2: "#1C1F28",
   ink: "#F3EFE6",
   muted: "#938E80",
+  muted2: "#5C594E",
   amber: "#C9A768",
-  amberDark: "#A6864A",
-  amberBg: "rgba(201,167,104,0.12)",
+  amberBright: "#EAD09A",
+  amberDark: "#8C6F35",
   green: "#3FBF8F",
   greenBg: "rgba(63,191,143,0.12)",
   rust: "#C0605A",
   rustBg: "rgba(192,96,90,0.14)",
-  plum: "#B58FD4",
-  plumBg: "rgba(181,143,212,0.12)",
-  hairline: "rgba(255,255,255,0.09)",
-  card: "#15171E",
+  plum: "#C79BD6",
+  plumBg: "rgba(199,155,214,0.12)",
+  hairline: "rgba(255,255,255,0.08)",
+  hairline2: "rgba(255,255,255,0.14)",
   midnight: "#1C1F28",
-  midnightSoft: "#191C24",
-  cream: "#14161C",
+  midnightSoft: "#20222C",
+  cream: "#F3EFE6",
 };
 
 const uid = () => crypto.randomUUID();
@@ -47,6 +50,31 @@ const uid = () => crypto.randomUUID();
 // this, "next" and the previous state would secretly share the same nested
 // objects, corrupting the before/after comparison used to decide what to save.
 const deepClone = (obj) => JSON.parse(JSON.stringify(obj));
+
+// Downloads everything (minus any transient in-flight receipt image data)
+// as a single JSON file the person can keep somewhere safe.
+function downloadBackup(data) {
+  const clean = deepClone(data);
+  ["customers", "suppliers"].forEach((k) => {
+    (clean[k] || []).forEach((entity) => {
+      (entity.transactions || []).forEach((t) => {
+        delete t._receiptData;
+      });
+    });
+  });
+  (clean.people || []).forEach((p) => (p.transactions || []).forEach((t) => delete t._receiptData));
+  (clean.expenses || []).forEach((e) => delete e._receiptData);
+
+  const blob = new Blob([JSON.stringify(clean, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `backup-${todayISO()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 function fmt(n) {
   const v = Math.round(Number(n) || 0);
@@ -78,6 +106,56 @@ function fmtTime(iso) {
 // Sort key combining date + real creation timestamp, newest first.
 function sortKey(t) {
   return t.createdAt || t.date || "";
+}
+
+/* ---------------- Receipt duplicate detection ----------------
+   We fingerprint the actual image bytes (SHA-256) right when a receipt is
+   attached, so re-uploading the exact same photo/screenshot for a second
+   transaction can be caught immediately, before the person even saves. */
+async function hashDataUrl(dataUrl) {
+  try {
+    const base64 = dataUrl.split(",")[1];
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const digest = await crypto.subtle.digest("SHA-256", bytes.buffer);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+// Scans every receipt already in the ledger for a matching fingerprint.
+// Returns a human-readable description of the first match, or null.
+function findDuplicateReceipt(data, hash, excludeTxId) {
+  if (!hash) return null;
+  for (const c of data.customers || []) {
+    for (const t of c.transactions || []) {
+      if (t.id !== excludeTxId && t.receiptHash === hash) {
+        return { name: c.name, context: t.type === "debt" ? "تحویل جنس" : "دریافت وجه", date: t.date };
+      }
+    }
+  }
+  for (const s of data.suppliers || []) {
+    for (const t of s.transactions || []) {
+      if (t.id !== excludeTxId && t.receiptHash === hash) {
+        return { name: s.name, context: t.type === "purchase" ? "خرید کالا" : "پرداخت", date: t.date };
+      }
+    }
+  }
+  for (const p of data.people || []) {
+    for (const t of p.transactions || []) {
+      if (t.id !== excludeTxId && t.receiptHash === hash) {
+        return { name: p.name, context: "تراکنش شخص", date: t.date };
+      }
+    }
+  }
+  for (const e of data.expenses || []) {
+    if (e.id !== excludeTxId && e.receiptHash === hash) {
+      return { name: EXPENSE_CATEGORY_LABEL[e.category] || "هزینه", context: "هزینه", date: e.date };
+    }
+  }
+  return null;
 }
 
 /* ---------------- Jalali (Shamsi) calendar helpers ----------------
@@ -189,9 +267,13 @@ async function loadData() {
           amount: Number(t.amount),
           date: t.date,
           createdAt: t.created_at,
+          receiptHash: t.receipt_hash || null,
           description: t.description || "",
           hasReceipt: !!t.receipt_path,
           items: custItemsByTx[t.id] || undefined,
+          cardId: t.card_id || null,
+          directPaySupplierId: t.direct_pay_supplier_id || null,
+          linkedSupplierTxId: t.linked_supplier_tx_id || null,
         })),
     }));
 
@@ -207,9 +289,13 @@ async function loadData() {
           amount: Number(t.amount),
           date: t.date,
           createdAt: t.created_at,
+          receiptHash: t.receipt_hash || null,
           description: t.description || "",
           hasReceipt: !!t.receipt_path,
           items: supItemsByTx[t.id] || undefined,
+          cardId: t.card_id || null,
+          directPayCustomerId: t.direct_pay_customer_id || null,
+          linkedCustomerTxId: t.linked_customer_tx_id || null,
         })),
     }));
 
@@ -224,6 +310,7 @@ async function loadData() {
           amount: Number(t.amount),
           date: t.date,
           createdAt: t.created_at,
+          receiptHash: t.receipt_hash || null,
           description: t.description || "",
           hasReceipt: !!t.receipt_path,
         })),
@@ -235,6 +322,7 @@ async function loadData() {
       amount: Number(e.amount),
       date: e.date,
       createdAt: e.created_at,
+      receiptHash: e.receipt_hash || null,
       description: e.description || "",
       hasReceipt: !!e.receipt_path,
       relatedSupplierId: e.related_supplier_id || null,
@@ -311,8 +399,12 @@ async function saveData(data, prev) {
             amount: t.amount,
             date: t.date,
             created_at: t.createdAt || undefined,
+            receipt_hash: t.receiptHash || null,
             description: t.description || null,
             receipt_path: t.hasReceipt ? t.id : null,
+            card_id: t.cardId || null,
+            direct_pay_supplier_id: t.directPaySupplierId || null,
+            linked_supplier_tx_id: t.linkedSupplierTxId || null,
           });
           (t.items || []).forEach((it) =>
             custItemRows.push({ id: it.id, transaction_id: t.id, product_name: it.productName, quantity: it.quantity, unit_price: it.unitPrice })
@@ -339,8 +431,12 @@ async function saveData(data, prev) {
             amount: t.amount,
             date: t.date,
             created_at: t.createdAt || undefined,
+            receipt_hash: t.receiptHash || null,
             description: t.description || null,
             receipt_path: t.hasReceipt ? t.id : null,
+            card_id: t.cardId || null,
+            direct_pay_customer_id: t.directPayCustomerId || null,
+            linked_customer_tx_id: t.linkedCustomerTxId || null,
           });
           (t.items || []).forEach((it) =>
             supItemRows.push({ id: it.id, transaction_id: t.id, product_name: it.productName, quantity: it.quantity, unit_price: it.unitPrice })
@@ -366,6 +462,7 @@ async function saveData(data, prev) {
             amount: t.amount,
             date: t.date,
             created_at: t.createdAt || undefined,
+            receipt_hash: t.receiptHash || null,
             description: t.description || null,
             receipt_path: t.hasReceipt ? t.id : null,
           })
@@ -383,6 +480,7 @@ async function saveData(data, prev) {
           amount: e.amount,
           date: e.date,
           created_at: e.createdAt || undefined,
+          receipt_hash: e.receiptHash || null,
           description: e.description || null,
           receipt_path: e.hasReceipt ? e.id : null,
           related_supplier_id: e.relatedSupplierId || null,
@@ -620,7 +718,7 @@ function Header({ title, onBack, right }) {
     >
       <div className="flex items-center gap-2">
         {onBack && (
-          <button onClick={onBack} className="p-1 -ml-1 rounded-full active:bg-white/10">
+          <button onClick={onBack} className="p-1 -ml-1 rounded-full active:bg-black/5">
             <ChevronLeft size={22} color={T.ink} />
           </button>
         )}
@@ -650,32 +748,6 @@ function Amount({ value, tone = "ink", size = "base" }) {
   );
 }
 
-// Counts up from 0 to `value` on mount, then renders through Amount so the
-// formatting/color/size stays identical to a normal static figure — only
-// the first paint moves.
-function CountUp({ value, duration = 1000, delay = 0, tone = "ink", size = "lg" }) {
-  const [display, setDisplay] = useState(0);
-  useEffect(() => {
-    let raf;
-    const to = Number(value) || 0;
-    const timer = setTimeout(() => {
-      const start = performance.now();
-      const step = (now) => {
-        const p = Math.min(1, (now - start) / duration);
-        const eased = 1 - Math.pow(1 - p, 3);
-        setDisplay(Math.round(to * eased));
-        if (p < 1) raf = requestAnimationFrame(step);
-      };
-      raf = requestAnimationFrame(step);
-    }, delay);
-    return () => {
-      clearTimeout(timer);
-      if (raf) cancelAnimationFrame(raf);
-    };
-  }, [value, duration, delay]);
-  return <Amount value={display} tone={tone} size={size} />;
-}
-
 function Perforation() {
   return (
     <div
@@ -688,12 +760,12 @@ function Perforation() {
   );
 }
 
-function Card({ children, onClick, className = "", style: extraStyle = {} }) {
+function Card({ children, onClick, className = "" }) {
   return (
     <div
       onClick={onClick}
       className={`rounded-2xl p-4 ${onClick ? "active:scale-[0.98] transition-transform" : ""} ${className}`}
-      style={{ background: T.card, border: `1px solid ${T.hairline}`, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04), 0 8px 20px -14px rgba(0,0,0,0.6)", ...extraStyle }}
+      style={{ background: T.card, border: `1px solid ${T.hairline}`, boxShadow: "0 1px 2px rgba(43,36,56,0.04)" }}
     >
       {children}
     </div>
@@ -703,11 +775,11 @@ function Card({ children, onClick, className = "", style: extraStyle = {} }) {
 // Colorful initials avatar for people/customers/suppliers — picks a hue
 // deterministically from the name so the same person always gets the same color.
 const AVATAR_PALETTE = [
-  { bg: "rgba(181,143,212,0.16)", fg: "#D3B3E8" }, // plum
-  { bg: "rgba(63,191,143,0.16)", fg: "#6BDDB0" }, // emerald
-  { bg: "rgba(201,167,104,0.18)", fg: "#E8CD98" }, // gold
-  { bg: "rgba(192,96,90,0.16)", fg: "#E39490" }, // garnet
-  { bg: "rgba(122,150,224,0.16)", fg: "#AEC1F2" }, // ink blue
+  { bg: "rgba(199,155,214,0.14)", fg: "#D9A8E8" }, // plum
+  { bg: "rgba(63,191,143,0.14)", fg: "#5FDDA8" }, // emerald
+  { bg: "rgba(201,167,104,0.16)", fg: "#EAD09A" }, // gold
+  { bg: "rgba(192,96,90,0.16)", fg: "#E08B84" }, // wine
+  { bg: "rgba(122,150,214,0.16)", fg: "#9BB8EA" }, // periwinkle
 ];
 function Avatar({ name, size = 38 }) {
   const idx = Math.abs((name || "?").split("").reduce((h, c) => h + c.charCodeAt(0), 0)) % AVATAR_PALETTE.length;
@@ -745,35 +817,6 @@ function StampBadge({ label = "تسویه", tone = "brass" }) {
   );
 }
 
-// Product "gauge" icon for the inventory list — a small can whose liquid
-// level mirrors real stock (relative to the fullest item in the list), so
-// the icon reports something true rather than just decorating the row.
-// At zero/negative stock it runs dry and tints rust instead of gold-green.
-function CanGauge({ stock, max = 100 }) {
-  const warn = stock <= 0;
-  const ratio = warn ? 0.05 : Math.max(0.08, Math.min(1, stock / Math.max(1, max)));
-  return (
-    <div style={{ width: 30, height: 42, flexShrink: 0 }}>
-      <svg viewBox="0 0 28 40" style={{ width: "100%", height: "100%", overflow: "visible" }}>
-        <rect x="4" y="7" width="20" height="29" rx="3" fill="none" stroke={T.hairline} strokeWidth="1.2" />
-        <rect
-          className="liquid-fill"
-          x="5.5" y="8.2" width="17" height="26.8" rx="2.4"
-          style={{ "--fill": ratio, fill: warn ? T.rust : T.green, opacity: 0.88 }}
-        />
-        <ellipse cx="14" cy="7" rx="10" ry="2.2" fill={T.midnightSoft} stroke={T.hairline} strokeWidth="1.1" />
-        {!warn && (
-          <>
-            <circle className="can-bubble" cx="11" cy="26" r="0.9" style={{ animationDuration: "2.3s", animationDelay: ".4s" }} />
-            <circle className="can-bubble" cx="17" cy="21" r="0.7" style={{ animationDuration: "2.7s", animationDelay: "1s" }} />
-          </>
-        )}
-        <rect x="7" y="11" width="1.6" height="18" rx="0.8" fill="rgba(255,255,255,.10)" />
-      </svg>
-    </div>
-  );
-}
-
 /* ---------------- Printable Invoice ---------------- */
 function InvoiceView({ kind, partyName, partyPhone, transaction, onClose }) {
   const invoiceNo = "INV-" + transaction.id.replace(/-/g, "").slice(0, 8).toUpperCase();
@@ -791,8 +834,8 @@ function InvoiceView({ kind, partyName, partyPhone, transaction, onClose }) {
             <X size={20} color="#fff" />
           </button>
           <button onClick={() => window.print()} className="flex items-center gap-1.5 px-4 py-2 rounded-full" style={{ background: T.amber }}>
-            <Printer size={15} color="#fff" />
-            <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: "#fff" }}>چاپ فاکتور</span>
+            <Printer size={15} color={T.bg} />
+            <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: T.bg }}>چاپ فاکتور</span>
           </button>
         </div>
 
@@ -895,7 +938,7 @@ function Modal({ title, onClose, children }) {
       >
         <div className="sticky top-0 flex items-center justify-between px-5 py-4" style={{ background: T.bg, borderBottom: `1px solid ${T.hairline}` }}>
           <h2 className="font-bold text-base" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>{title}</h2>
-          <button onClick={onClose} className="p-1 rounded-full active:bg-white/10">
+          <button onClick={onClose} className="p-1 rounded-full active:bg-black/5">
             <X size={20} color={T.muted} />
           </button>
         </div>
@@ -935,12 +978,11 @@ const inputStyle = {
   padding: "11px 14px",
   borderRadius: "12px",
   border: `1px solid ${T.hairline}`,
-  background: T.midnightSoft,
+  background: "#101216",
   color: T.ink,
   fontFamily: "Vazirmatn",
   fontSize: "15px",
   outline: "none",
-  colorScheme: "dark",
 };
 
 function TextInput(props) {
@@ -948,6 +990,25 @@ function TextInput(props) {
 }
 function TextArea(props) {
   return <textarea {...props} style={{ ...inputStyle, minHeight: "80px", resize: "vertical", ...(props.style || {}) }} />;
+}
+
+function SearchBar({ value, onChange, placeholder = "جستجو..." }) {
+  return (
+    <div className="flex items-center gap-2 rounded-2xl px-3.5 py-2.5" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
+      <Search size={15} color={T.muted} className="shrink-0" />
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: T.ink, fontFamily: "Vazirmatn", fontSize: "13px" }}
+      />
+      {value && (
+        <button onClick={() => onChange("")} className="shrink-0">
+          <X size={14} color={T.muted} />
+        </button>
+      )}
+    </div>
+  );
 }
 
 // Numeric input that shows live thousand-separators (1,000,000) while
@@ -1010,10 +1071,10 @@ function PrimaryButton({ children, onClick, disabled, full = true }) {
       disabled={disabled}
       className={`${full ? "w-full" : ""} py-3 rounded-xl font-bold text-sm active:scale-[0.98] transition-transform`}
       style={{
-        background: disabled ? "#2A2C33" : T.amber,
-        color: "#fff",
+        background: disabled ? "#3A3628" : `linear-gradient(135deg, ${T.amberBright}, ${T.amberDark})`,
+        color: "#1A1408",
         fontFamily: "Vazirmatn",
-        opacity: disabled ? 0.7 : 1,
+        opacity: disabled ? 0.6 : 1,
       }}
     >
       {children}
@@ -1030,33 +1091,20 @@ function BottomNav({ tab, setTab }) {
     { id: "inventory", label: "انبار", icon: Package },
     { id: "treasury", label: "صندوق", icon: Wallet },
   ];
-  const activeIndex = Math.max(0, items.findIndex((it) => it.id === tab));
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 flex justify-center px-3" style={{ paddingBottom: "max(14px, env(safe-area-inset-bottom))" }}>
       <div
-        className="relative flex items-center w-full max-w-md px-1.5 py-1.5"
-        style={{ background: T.midnight, border: `1px solid ${T.hairline}`, borderRadius: "9999px", boxShadow: "0 16px 40px rgba(0,0,0,0.5)" }}
+        className="flex items-center gap-0.5 px-2 py-2"
+        style={{ background: T.midnight, borderRadius: "9999px", boxShadow: "0 10px 30px rgba(27,30,43,0.35)" }}
       >
-        <div
-          aria-hidden="true"
-          className="absolute top-1.5 bottom-1.5 right-1.5"
-          style={{
-            width: `calc((100% - 12px) / ${items.length})`,
-            transform: `translateX(${-activeIndex * 100}%)`,
-            transition: "transform .38s cubic-bezier(.4,0,.2,1)",
-            borderRadius: "9999px",
-            background: `linear-gradient(135deg, #EAD09A, ${T.amber})`,
-            zIndex: 0,
-          }}
-        />
         {items.map((it) => {
           const active = tab === it.id;
           return (
             <button
               key={it.id}
               onClick={() => setTab(it.id)}
-              className="relative flex-1 flex flex-col items-center gap-1 px-1 py-2 rounded-full transition-colors"
-              style={{ color: active ? T.midnight : "rgba(255,255,255,0.55)", zIndex: 1 }}
+              className="flex flex-col items-center gap-1 px-3 py-2 rounded-full transition-colors"
+              style={{ color: active ? T.midnight : "rgba(255,255,255,0.55)", background: active ? T.amber : "transparent", minWidth: 54 }}
             >
               <it.icon size={19} strokeWidth={active ? 2.4 : 1.8} />
               <span style={{ fontFamily: "Vazirmatn", fontSize: "9.5px", fontWeight: active ? 700 : 500 }}>{it.label}</span>
@@ -1108,6 +1156,59 @@ function ReceiptPicker({ value, onChange }) {
           {busy ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
           <span style={{ fontFamily: "Vazirmatn", fontSize: "14px" }}>{busy ? "در حال پردازش..." : "افزودن عکس رسید (اختیاری)"}</span>
         </button>
+      )}
+    </div>
+  );
+}
+
+// Wraps ReceiptPicker with automatic duplicate-photo detection: as soon as
+// an image is attached, it's fingerprinted and checked against every other
+// receipt already in the ledger.
+function ReceiptField({ value, onChange, data, excludeTxId, onHashChange }) {
+  const [checking, setChecking] = useState(false);
+  const [dup, setDup] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!value) {
+      setDup(null);
+      onHashChange(null);
+      return;
+    }
+    // Existing receipts loaded during edit come back as blob: object URLs,
+    // not data: URLs — those are already-recorded, so leave the saved hash alone.
+    if (!value.startsWith("data:")) {
+      setDup(null);
+      return;
+    }
+    setChecking(true);
+    hashDataUrl(value).then((hash) => {
+      if (cancelled) return;
+      onHashChange(hash);
+      setDup(findDuplicateReceipt(data, hash, excludeTxId));
+      setChecking(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  return (
+    <div>
+      <ReceiptPicker value={value} onChange={onChange} />
+      {checking && (
+        <p className="mt-2 flex items-center gap-1.5" style={{ fontFamily: "Vazirmatn", fontSize: "11.5px", color: T.muted }}>
+          <Loader2 size={12} className="animate-spin" /> در حال بررسی تکراری بودن رسید...
+        </p>
+      )}
+      {dup && (
+        <div className="mt-2 px-3 py-2.5 rounded-xl flex items-start gap-2" style={{ background: T.rustBg }}>
+          <AlertCircle size={15} color={T.rust} className="shrink-0 mt-0.5" />
+          <p style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: T.rust, lineHeight: 1.8 }}>
+            این عکس قبلاً برای «{dup.name} — {dup.context}» ({fmtDate(dup.date)}) استفاده شده. اگه اشتباهی همون رسید رو دوباره انتخاب کردی، عکسو پاک کن و درست رو بذار.
+          </p>
+        </div>
       )}
     </div>
   );
@@ -1250,11 +1351,19 @@ function LedgerApp() {
         {tab === "customers" && customer && (
           <CustomerDetail
             customer={customer}
+            data={data}
             onBack={() => setOpenCustomer(null)}
             openModal={setModal}
             onDeleteTx={async (txId) => {
               const next = deepClone(data);
               const c = next.customers.find((x) => x.id === customer.id);
+              const tx = (c.transactions || []).find((t) => t.id === txId);
+              if (tx?.linkedSupplierTxId) {
+                for (const s of next.suppliers) {
+                  s.transactions = (s.transactions || []).filter((t) => t.id !== tx.linkedSupplierTxId);
+                }
+                await deleteReceipt(tx.linkedSupplierTxId);
+              }
               c.transactions = c.transactions.filter((t) => t.id !== txId);
               await deleteReceipt(txId);
               persist(next);
@@ -1278,11 +1387,19 @@ function LedgerApp() {
           <SupplierDetail
             supplier={supplier}
             expenses={data.expenses}
+            data={data}
             onBack={() => setOpenSupplier(null)}
             openModal={setModal}
             onDeleteTx={async (txId) => {
               const next = deepClone(data);
               const s = next.suppliers.find((x) => x.id === supplier.id);
+              const tx = (s.transactions || []).find((t) => t.id === txId);
+              if (tx?.linkedCustomerTxId) {
+                for (const c of next.customers) {
+                  c.transactions = (c.transactions || []).filter((t) => t.id !== tx.linkedCustomerTxId);
+                }
+                await deleteReceipt(tx.linkedCustomerTxId);
+              }
               s.transactions = s.transactions.filter((t) => t.id !== txId);
               await deleteReceipt(txId);
               persist(next);
@@ -1349,6 +1466,14 @@ function LedgerApp() {
               await deleteReceipt(item.id);
               persist(next);
             }}
+            onDeletePerson={async (personId) => {
+              const target = data.people.find((x) => x.id === personId);
+              for (const t of target?.transactions || []) {
+                if (t.hasReceipt) await deleteReceipt(t.id);
+              }
+              const next = { ...data, people: data.people.filter((x) => x.id !== personId) };
+              persist(next);
+            }}
           />
         )}
 
@@ -1380,14 +1505,55 @@ function LedgerApp() {
 
         {modal?.type === "customerTx" && (
           <CustomerTxModal
+            data={data}
+            editTx={modal.editTx}
             productSuggestions={getAllProductNames(data)}
             onClose={() => setModal(null)}
             onSubmit={async (tx) => {
               const next = deepClone(data);
               const c = next.customers.find((x) => x.id === modal.customerId);
-              c.transactions = [...(c.transactions || []), tx];
+              const idx = (c.transactions || []).findIndex((t) => t.id === tx.id);
+
+              // Sync (create/update/remove) the linked supplier-side payment for a direct pass-through.
+              const prevLinkedId = tx.linkedSupplierTxId;
+              if (tx.directPaySupplierId) {
+                const targetSupplier = next.suppliers.find((s) => s.id === tx.directPaySupplierId);
+                const linkedId = prevLinkedId || uid();
+                tx.linkedSupplierTxId = linkedId;
+                if (targetSupplier) {
+                  const linkedTx = {
+                    id: linkedId,
+                    type: "payment",
+                    amount: tx.amount,
+                    date: tx.date,
+                    createdAt: tx.createdAt,
+                    description: `پرداخت مستقیم توسط مشتری: ${c.name}`,
+                    hasReceipt: tx.hasReceipt,
+                    _receiptData: tx._receiptData,
+                    receiptHash: tx.receiptHash,
+                    directPayCustomerId: c.id,
+                    linkedCustomerTxId: tx.id,
+                  };
+                  const lIdx = (targetSupplier.transactions || []).findIndex((t) => t.id === linkedId);
+                  if (lIdx >= 0) targetSupplier.transactions[lIdx] = linkedTx;
+                  else targetSupplier.transactions = [...(targetSupplier.transactions || []), linkedTx];
+                }
+              } else if (prevLinkedId) {
+                // direct-pay was turned off — remove the previously-linked supplier entry
+                for (const s of next.suppliers) {
+                  s.transactions = (s.transactions || []).filter((t) => t.id !== prevLinkedId);
+                }
+                await deleteReceipt(prevLinkedId);
+                tx.linkedSupplierTxId = null;
+              }
+
+              if (idx >= 0) c.transactions[idx] = tx;
+              else c.transactions = [...(c.transactions || []), tx];
               await persist(next);
-              if (tx.hasReceipt && tx._receiptData) await saveReceipt(tx.id, tx._receiptData);
+              if (tx.hasReceipt && tx._receiptData) {
+                await saveReceipt(tx.id, tx._receiptData);
+                if (tx.linkedSupplierTxId) await saveReceipt(tx.linkedSupplierTxId, tx._receiptData);
+              }
               setModal(null);
             }}
           />
@@ -1395,6 +1561,8 @@ function LedgerApp() {
 
         {modal?.type === "supplierTx" && (
           <SupplierTxModal
+            data={data}
+            editTx={modal.editTx}
             supplier={data.suppliers.find((s) => s.id === modal.supplierId)}
             productSuggestions={getAllProductNames(data)}
             onClose={() => setModal(null)}
@@ -1404,9 +1572,46 @@ function LedgerApp() {
             onSubmit={async (tx) => {
               const next = deepClone(data);
               const s = next.suppliers.find((x) => x.id === modal.supplierId);
-              s.transactions = [...(s.transactions || []), tx];
+              const idx = (s.transactions || []).findIndex((t) => t.id === tx.id);
+
+              const prevLinkedId = tx.linkedCustomerTxId;
+              if (tx.directPayCustomerId) {
+                const targetCustomer = next.customers.find((c) => c.id === tx.directPayCustomerId);
+                const linkedId = prevLinkedId || uid();
+                tx.linkedCustomerTxId = linkedId;
+                if (targetCustomer) {
+                  const linkedTx = {
+                    id: linkedId,
+                    type: "payment",
+                    amount: tx.amount,
+                    date: tx.date,
+                    createdAt: tx.createdAt,
+                    description: `پرداخت مستقیم به تامین‌کننده: ${s.name}`,
+                    hasReceipt: tx.hasReceipt,
+                    _receiptData: tx._receiptData,
+                    receiptHash: tx.receiptHash,
+                    directPaySupplierId: s.id,
+                    linkedSupplierTxId: tx.id,
+                  };
+                  const lIdx = (targetCustomer.transactions || []).findIndex((t) => t.id === linkedId);
+                  if (lIdx >= 0) targetCustomer.transactions[lIdx] = linkedTx;
+                  else targetCustomer.transactions = [...(targetCustomer.transactions || []), linkedTx];
+                }
+              } else if (prevLinkedId) {
+                for (const c of next.customers) {
+                  c.transactions = (c.transactions || []).filter((t) => t.id !== prevLinkedId);
+                }
+                await deleteReceipt(prevLinkedId);
+                tx.linkedCustomerTxId = null;
+              }
+
+              if (idx >= 0) s.transactions[idx] = tx;
+              else s.transactions = [...(s.transactions || []), tx];
               await persist(next);
-              if (tx.hasReceipt && tx._receiptData) await saveReceipt(tx.id, tx._receiptData);
+              if (tx.hasReceipt && tx._receiptData) {
+                await saveReceipt(tx.id, tx._receiptData);
+                if (tx.linkedCustomerTxId) await saveReceipt(tx.linkedCustomerTxId, tx._receiptData);
+              }
               setModal(null);
             }}
           />
@@ -1491,69 +1696,42 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
       return lb.localeCompare(la);
     })
     .slice(0, 3);
-  const netBalance = totalReceivable - totalPayable;
-  const settled = totalReceivable === 0 && totalPayable === 0;
-  const [sheenKey, setSheenKey] = useState(0);
 
   return (
     <div className="px-4 pt-6">
-      <div
-        className="anim-fade-up rounded-3xl px-5 py-5 relative overflow-hidden"
-        style={{ background: T.card, border: `1px solid ${T.hairline}`, animationDelay: ".05s" }}
-        onMouseEnter={() => setSheenKey((k) => k + 1)}
-      >
-        <div className="flex items-start justify-between">
-          <div>
-            <p style={{ fontFamily: "Vazirmatn", color: T.amber, fontSize: "11px", fontWeight: 600, letterSpacing: "1px" }}>دفتر حساب</p>
-            <h1 className="text-xl font-extrabold mt-1" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>خلاصه حساب</h1>
-          </div>
-          {settled && <StampBadge label="تسویه" tone="brass" />}
+      <div className="rounded-3xl px-5 py-5 relative overflow-hidden flex items-center justify-between" style={{ background: T.midnight }}>
+        <div>
+          <p style={{ fontFamily: "Vazirmatn", color: "rgba(255,255,255,0.5)", fontSize: "12px", fontWeight: 600, letterSpacing: "0.3px" }}>دفتر حساب</p>
+          <h1 className="text-2xl font-extrabold mt-1" style={{ color: "#fff", fontFamily: "Vazirmatn" }}>خلاصه حساب</h1>
+          <div className="mt-3" style={{ width: 34, height: 3, background: T.amber, borderRadius: 2 }} />
         </div>
+        {totalReceivable === 0 && totalPayable === 0 && <StampBadge label="تسویه" tone="brass" />}
+      </div>
 
-        <div className="mt-3.5" style={{ width: 38, height: 2, borderRadius: 2, background: `linear-gradient(90deg, #EAD09A, ${T.amberDark})` }} />
-
-        <p className="mt-4" style={{ fontFamily: "Vazirmatn", fontSize: "11px", color: T.muted, fontWeight: 600, letterSpacing: "0.3px" }}>مانده خالص</p>
-        <div className="mt-1.5 flex items-baseline gap-1.5">
-          <CountUp value={Math.abs(netBalance)} tone={netBalance >= 0 ? "green" : "rust"} size="lg" duration={1100} delay={200} />
-          <span style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: T.muted }}>تومان</span>
+      <div className="grid grid-cols-2 gap-3 mt-4">
+        <div className="rounded-2xl p-4" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
+          <p style={{ fontFamily: "Vazirmatn", fontSize: "11.5px", color: T.muted, fontWeight: 600 }}>طلب از مشتریان</p>
+          <div className="mt-2"><Amount value={totalReceivable} tone="green" size="lg" /></div>
         </div>
-
-        <div className="mt-4" style={{ height: 1, background: T.hairline }} />
-
-        <div className="mt-3.5 flex">
-          <div className="flex-1">
-            <div className="flex items-center gap-1.5" style={{ fontFamily: "Vazirmatn", fontSize: "11px", color: T.muted, fontWeight: 600 }}>
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: T.green, display: "inline-block" }} />
-              طلب از مشتریان
-            </div>
-            <div className="mt-1.5"><CountUp value={totalReceivable} tone="green" size="base" duration={1000} delay={400} /></div>
-          </div>
-          <div style={{ width: 1, background: T.hairline, margin: "0 14px" }} />
-          <div className="flex-1">
-            <div className="flex items-center gap-1.5" style={{ fontFamily: "Vazirmatn", fontSize: "11px", color: T.muted, fontWeight: 600 }}>
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: T.rust, display: "inline-block" }} />
-              بدهی به تامین‌کنندگان
-            </div>
-            <div className="mt-1.5"><CountUp value={totalPayable} tone="rust" size="base" duration={1000} delay={500} /></div>
-          </div>
+        <div className="rounded-2xl p-4" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
+          <p style={{ fontFamily: "Vazirmatn", fontSize: "11.5px", color: T.muted, fontWeight: 600 }}>بدهی به تامین‌کنندگان</p>
+          <div className="mt-2"><Amount value={totalPayable} tone="rust" size="lg" /></div>
         </div>
-
-        <div key={sheenKey} className="hero-sheen" />
       </div>
 
       <button
         onClick={() => goTab("inventory")}
-        className="anim-fade-up w-full rounded-2xl p-4 mt-3 flex items-center justify-between active:scale-[0.98] transition-transform"
-        style={{ background: T.card, border: `1px solid ${T.hairline}`, animationDelay: ".16s" }}
+        className="w-full rounded-2xl p-4 mt-3 flex items-center justify-between active:scale-[0.98] transition-transform"
+        style={{ background: T.card, border: `1px solid ${T.hairline}` }}
       >
         <div className="text-right">
           <p style={{ fontFamily: "Vazirmatn", fontSize: "11.5px", color: T.muted, fontWeight: 600 }}>سود خالص تخمینی</p>
-          <div className="mt-2"><CountUp value={Math.abs(totalProfit)} tone={totalProfit >= 0 ? "green" : "rust"} size="lg" duration={900} delay={250} /></div>
+          <div className="mt-2"><Amount value={Math.abs(totalProfit)} tone={totalProfit >= 0 ? "green" : "rust"} size="lg" /></div>
         </div>
-        <TrendingUp size={18} color={T.amber} />
+        <TrendingUp size={18} color={T.muted} />
       </button>
 
-      <div className="anim-fade-up flex gap-3 mt-4" style={{ animationDelay: ".24s" }}>
+      <div className="flex gap-3 mt-4">
         <button onClick={() => openModal({ type: "newCustomer" })} className="flex-1 flex items-center justify-center gap-1.5 py-3 rounded-xl active:scale-[0.98] transition-transform" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
           <Plus size={16} color={T.amberDark} />
           <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: T.ink }}>مشتری جدید</span>
@@ -1564,7 +1742,7 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
         </button>
       </div>
 
-      <div className="anim-fade-up flex flex-col gap-2 mt-3" style={{ animationDelay: ".3s" }}>
+      <div className="flex flex-col gap-2 mt-3">
         <button onClick={() => goTab("reports")} className="w-full flex items-center justify-between px-4 py-3 rounded-xl active:scale-[0.98] transition-transform" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
           <span className="flex items-center gap-2" style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: T.ink }}>
             <FileText size={16} color={T.muted} /> گزارش‌ها و یادداشت‌های کاری
@@ -1577,6 +1755,12 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
           </span>
           <ChevronLeft size={16} color={T.muted} style={{ transform: "rotate(180deg)" }} />
         </button>
+        <button onClick={() => downloadBackup(data)} className="w-full flex items-center justify-between px-4 py-3 rounded-xl active:scale-[0.98] transition-transform" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
+          <span className="flex items-center gap-2" style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: T.ink }}>
+            <Download size={16} color={T.muted} /> پشتیبان‌گیری از اطلاعات
+          </span>
+          <ChevronLeft size={16} color={T.muted} style={{ transform: "rotate(180deg)" }} />
+        </button>
         <button onClick={() => supabase.auth.signOut()} className="w-full flex items-center justify-between px-4 py-3 rounded-xl active:scale-[0.98] transition-transform" style={{ background: T.card, border: `1px solid ${T.hairline}` }}>
           <span className="flex items-center gap-2" style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: T.rust }}>
             <LogOut size={16} color={T.rust} /> خروج از حساب
@@ -1585,7 +1769,7 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
       </div>
 
       <div className="mt-7">
-        <div className="anim-fade-up flex items-center justify-between mb-2.5" style={{ animationDelay: ".36s" }}>
+        <div className="flex items-center justify-between mb-2.5">
           <h2 className="font-bold text-sm" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>آخرین فعالیت مشتریان</h2>
           <button onClick={() => goTab("customers")} style={{ color: T.amberDark, fontFamily: "Vazirmatn", fontSize: "12px", fontWeight: 700 }}>همه</button>
         </div>
@@ -1593,10 +1777,10 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
           <Card><p style={{ fontFamily: "Vazirmatn", color: T.muted, fontSize: "13px" }} className="text-center py-2">هنوز فعالیتی ثبت نشده.</p></Card>
         ) : (
           <div className="flex flex-col gap-2">
-            {recentCustomers.map((c, i) => {
+            {recentCustomers.map((c) => {
               const bal = customerBalance(c);
               return (
-                <Card key={c.id} className="anim-row-in" style={{ animationDelay: `${0.42 + i * 0.07}s` }}>
+                <Card key={c.id}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
                       <Avatar name={c.name} size={34} />
@@ -1616,17 +1800,31 @@ function Dashboard({ data, totalReceivable, totalPayable, openModal, goTab }) {
 
 /* ---------------- Customers ---------------- */
 function CustomerList({ data, onOpen, openModal }) {
+  const [query, setQuery] = useState("");
+  const filtered = data.customers.filter((c) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return c.name.toLowerCase().includes(q) || (c.phone || "").includes(q);
+  });
   return (
     <div className="px-4 pt-5">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-extrabold" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>مشتریان</h1>
         <button onClick={() => openModal({ type: "newCustomer" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-          <Plus size={17} color="#fff" />
+          <Plus size={17} color={T.bg} />
         </button>
       </div>
+      {data.customers.length > 0 && (
+        <div className="mt-4">
+          <SearchBar value={query} onChange={setQuery} placeholder="جستجوی مشتری..." />
+        </div>
+      )}
       <div className="mt-4 flex flex-col gap-2.5">
         {data.customers.length === 0 && <Empty icon={Users} title="هنوز مشتری‌ای ثبت نشده" subtitle="با دکمه بالا اولین مشتری را اضافه کنید." />}
-        {data.customers.map((c) => {
+        {data.customers.length > 0 && filtered.length === 0 && (
+          <p className="text-center py-8" style={{ fontFamily: "Vazirmatn", color: T.muted, fontSize: "13px" }}>چیزی پیدا نشد.</p>
+        )}
+        {filtered.map((c) => {
           const bal = customerBalance(c);
           return (
             <Card key={c.id} onClick={() => onOpen(c.id)}>
@@ -1651,7 +1849,7 @@ function CustomerList({ data, onOpen, openModal }) {
   );
 }
 
-function CustomerDetail({ customer, onBack, openModal, onDeleteTx, onDeleteCustomer }) {
+function CustomerDetail({ customer, data, onBack, openModal, onDeleteTx, onDeleteCustomer }) {
   const bal = customerBalance(customer);
   const sorted = [...(customer.transactions || [])].sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1665,7 +1863,7 @@ function CustomerDetail({ customer, onBack, openModal, onDeleteTx, onDeleteCusto
         title={customer.name}
         onBack={onBack}
         right={
-          <button onClick={() => setConfirmDelete(true)} className="p-2 rounded-full active:bg-white/10">
+          <button onClick={() => setConfirmDelete(true)} className="p-2 rounded-full active:bg-black/5">
             <Trash2 size={18} color={T.rust} />
           </button>
         }
@@ -1722,6 +1920,8 @@ function CustomerDetail({ customer, onBack, openModal, onDeleteTx, onDeleteCusto
                           ))}
                         </div>
                       )}
+                      {t.directPaySupplierId && (() => { const sp = data.suppliers.find((x) => x.id === t.directPaySupplierId); return sp ? <p className="text-xs mt-0.5" style={{ color: T.amberDark, fontFamily: "Vazirmatn" }}>{"\u2192 مستقیم به تامین\u200cکننده: " + sp.name}</p> : null; })()}
+                      {t.cardId && (() => { const cd = data.cards.find((x) => x.id === t.cardId); return cd ? <p className="text-xs mt-0.5" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{"\ud83d\udcb3 " + cd.bankName}</p> : null; })()}
                       {t.description && <p className="text-xs mt-0.5" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{t.description}</p>}
                       <p className="text-xs mt-1" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{fmtDate(t.date)}{t.createdAt && <span dir="ltr"> — {fmtTime(t.createdAt)}</span>}</p>
                     </div>
@@ -1735,7 +1935,12 @@ function CustomerDetail({ customer, onBack, openModal, onDeleteTx, onDeleteCusto
                         <span style={{ fontFamily: "Vazirmatn", fontSize: "11px", color: T.plum }}>فاکتور</span>
                       </button>
                     )}
-                    <button onClick={() => onDeleteTx(t.id)} className="text-[11px]" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>حذف</button>
+                    <div className="flex items-center gap-2.5">
+                      <button onClick={() => openModal({ type: "customerTx", customerId: customer.id, editTx: t })} className="text-[11px] flex items-center gap-0.5" style={{ color: T.amberDark, fontFamily: "Vazirmatn" }}>
+                        <Pencil size={11} /> ویرایش
+                      </button>
+                      <button onClick={() => onDeleteTx(t.id)} className="text-[11px]" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>حذف</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1749,17 +1954,31 @@ function CustomerDetail({ customer, onBack, openModal, onDeleteTx, onDeleteCusto
 
 /* ---------------- Suppliers ---------------- */
 function SupplierList({ data, onOpen, openModal }) {
+  const [query, setQuery] = useState("");
+  const filtered = data.suppliers.filter((s) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return s.name.toLowerCase().includes(q) || (s.phone || "").includes(q);
+  });
   return (
     <div className="px-4 pt-5">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-extrabold" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>تامین‌کنندگان</h1>
         <button onClick={() => openModal({ type: "newSupplier" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-          <Plus size={17} color="#fff" />
+          <Plus size={17} color={T.bg} />
         </button>
       </div>
+      {data.suppliers.length > 0 && (
+        <div className="mt-4">
+          <SearchBar value={query} onChange={setQuery} placeholder="جستجوی تامین‌کننده..." />
+        </div>
+      )}
       <div className="mt-4 flex flex-col gap-2.5">
         {data.suppliers.length === 0 && <Empty icon={Truck} title="هنوز تامین‌کننده‌ای ثبت نشده" subtitle="با دکمه بالا اولین تامین‌کننده را اضافه کنید." />}
-        {data.suppliers.map((s) => {
+        {data.suppliers.length > 0 && filtered.length === 0 && (
+          <p className="text-center py-8" style={{ fontFamily: "Vazirmatn", color: T.muted, fontSize: "13px" }}>چیزی پیدا نشد.</p>
+        )}
+        {filtered.map((s) => {
           const bal = supplierBalance(s);
           return (
             <Card key={s.id} onClick={() => onOpen(s.id)}>
@@ -1784,7 +2003,7 @@ function SupplierList({ data, onOpen, openModal }) {
   );
 }
 
-function SupplierDetail({ supplier, expenses, onBack, openModal, onDeleteTx, onDeleteExpense, onDeleteSupplier }) {
+function SupplierDetail({ supplier, expenses, data, onBack, openModal, onDeleteTx, onDeleteExpense, onDeleteSupplier }) {
   const bal = supplierBalance(supplier);
   const sorted = [...(supplier.transactions || [])].sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
   const purchases = (supplier.transactions || []).filter((t) => t.type === "purchase");
@@ -1806,7 +2025,7 @@ function SupplierDetail({ supplier, expenses, onBack, openModal, onDeleteTx, onD
         title={supplier.name}
         onBack={onBack}
         right={
-          <button onClick={() => setConfirmDelete(true)} className="p-2 rounded-full active:bg-white/10">
+          <button onClick={() => setConfirmDelete(true)} className="p-2 rounded-full active:bg-black/5">
             <Trash2 size={18} color={T.rust} />
           </button>
         }
@@ -1844,7 +2063,7 @@ function SupplierDetail({ supplier, expenses, onBack, openModal, onDeleteTx, onD
             openModal({ type: "treasuryTx", initial: { about: "expense", direction: "out", category: "shipping", supplierId: supplier.id, lockSupplier: true } })
           }
           className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl mt-2"
-          style={{ background: T.amberBg }}
+          style={{ background: "rgba(201,167,104,0.12)" }}
         >
           <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: T.amberDark }}>+ هزینه حمل یا جانبی (بر عهده خودتان، نه تامین‌کننده)</span>
           <ChevronLeft size={15} color={T.amberDark} style={{ transform: "rotate(180deg)" }} />
@@ -1945,6 +2164,8 @@ function SupplierDetail({ supplier, expenses, onBack, openModal, onDeleteTx, onD
                           ))}
                         </div>
                       )}
+                      {t.directPayCustomerId && (() => { const cu = data.customers.find((x) => x.id === t.directPayCustomerId); return cu ? <p className="text-xs mt-0.5" style={{ color: T.amberDark, fontFamily: "Vazirmatn" }}>{"\u2192 مستقیم توسط مشتری: " + cu.name}</p> : null; })()}
+                      {t.cardId && (() => { const cd = data.cards.find((x) => x.id === t.cardId); return cd ? <p className="text-xs mt-0.5" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{"\ud83d\udcb3 " + cd.bankName}</p> : null; })()}
                       {t.description && <p className="text-xs mt-0.5" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{t.description}</p>}
                       <p className="text-xs mt-1" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>{fmtDate(t.date)}{t.createdAt && <span dir="ltr"> — {fmtTime(t.createdAt)}</span>}</p>
                     </div>
@@ -1958,7 +2179,12 @@ function SupplierDetail({ supplier, expenses, onBack, openModal, onDeleteTx, onD
                         <span style={{ fontFamily: "Vazirmatn", fontSize: "11px", color: T.plum }}>فاکتور</span>
                       </button>
                     )}
-                    <button onClick={() => onDeleteTx(t.id)} className="text-[11px]" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>حذف</button>
+                    <div className="flex items-center gap-2.5">
+                      <button onClick={() => openModal({ type: "supplierTx", supplierId: supplier.id, editTx: t })} className="text-[11px] flex items-center gap-0.5" style={{ color: T.amberDark, fontFamily: "Vazirmatn" }}>
+                        <Pencil size={11} /> ویرایش
+                      </button>
+                      <button onClick={() => onDeleteTx(t.id)} className="text-[11px]" style={{ color: T.muted, fontFamily: "Vazirmatn" }}>حذف</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1980,7 +2206,7 @@ function Reports({ data, openModal, persist, goTab }) {
     <div>
       <Header title="گزارش‌ها" onBack={() => goTab("dashboard")} right={
         <button onClick={() => openModal({ type: "newReport" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-          <Plus size={17} color="#fff" />
+          <Plus size={17} color={T.bg} />
         </button>
       } />
       <div className="px-4 pt-4 flex flex-col gap-2.5">
@@ -2055,7 +2281,7 @@ function Cards({ data, openModal, goTab, onDeleteCard }) {
         onBack={() => goTab("dashboard")}
         right={
           <button onClick={() => openModal({ type: "newCard" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-            <Plus size={17} color="#fff" />
+            <Plus size={17} color={T.bg} />
           </button>
         }
       />
@@ -2074,7 +2300,6 @@ function Inventory({ data, openModal, onDeleteStockAdjustment }) {
   const stats = computeProductStats(data);
   const totalProfit = stats.reduce((s, r) => s + r.profit, 0);
   const stockValue = stats.reduce((s, r) => s + Math.max(r.stock, 0) * r.avgCost, 0);
-  const maxStock = Math.max(1, ...stats.map((r) => r.stock));
   const adjustments = [...(data.stockAdjustments || [])].sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
 
   return (
@@ -2082,18 +2307,18 @@ function Inventory({ data, openModal, onDeleteStockAdjustment }) {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-extrabold" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>انبار و سود</h1>
         <button onClick={() => openModal({ type: "newStockAdjustment" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-          <Plus size={17} color="#fff" />
+          <Plus size={17} color={T.bg} />
         </button>
       </div>
 
-      <div className="anim-fade-up grid grid-cols-2 gap-3 mt-5" style={{ animationDelay: ".08s" }}>
+      <div className="grid grid-cols-2 gap-3 mt-5">
         <div className="rounded-2xl p-4" style={{ background: totalProfit >= 0 ? T.greenBg : T.rustBg }}>
           <p style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: totalProfit >= 0 ? T.green : T.rust, fontWeight: 600 }}>سود خالص کل</p>
-          <div className="mt-2"><CountUp value={Math.abs(totalProfit)} tone={totalProfit >= 0 ? "green" : "rust"} size="lg" duration={950} delay={150} /></div>
+          <div className="mt-2"><Amount value={Math.abs(totalProfit)} tone={totalProfit >= 0 ? "green" : "rust"} size="lg" /></div>
         </div>
-        <div className="rounded-2xl p-4" style={{ background: T.midnightSoft }}>
+        <div className="rounded-2xl p-4" style={{ background: T.card2 }}>
           <p style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: T.muted, fontWeight: 600 }}>ارزش انبار موجود</p>
-          <div className="mt-2"><CountUp value={stockValue} tone="ink" size="lg" duration={950} delay={220} /></div>
+          <div className="mt-2"><Amount value={stockValue} size="lg" /></div>
         </div>
       </div>
 
@@ -2113,16 +2338,13 @@ function Inventory({ data, openModal, onDeleteStockAdjustment }) {
         <Empty icon={Package} title="هنوز کالایی ثبت نشده" subtitle="با ثبت خرید از تامین‌کننده یا فروش به مشتری، کالاها اینجا نمایش داده می‌شوند." />
       ) : (
         <div className="flex flex-col gap-2.5">
-          {stats.map((r, i) => (
-            <Card key={r.productName} className="anim-row-in" style={{ animationDelay: `${i * 0.06}s` }}>
-              <div className="flex items-center gap-3">
-                <CanGauge stock={r.stock} max={maxStock} />
-                <div className="flex-1 min-w-0 flex items-center justify-between">
-                  <p style={{ fontFamily: "Vazirmatn", fontWeight: 700, color: T.ink, fontSize: "14px" }}>{r.productName}</p>
-                  {r.stock < 0 && (
-                    <span style={{ fontFamily: "Vazirmatn", fontSize: "10.5px", color: T.rust, background: T.rustBg, padding: "2px 8px", borderRadius: 999 }}>⚠ موجودی منفی</span>
-                  )}
-                </div>
+          {stats.map((r) => (
+            <Card key={r.productName}>
+              <div className="flex items-center justify-between">
+                <p style={{ fontFamily: "Vazirmatn", fontWeight: 700, color: T.ink, fontSize: "14px" }}>{r.productName}</p>
+                {r.stock < 0 && (
+                  <span style={{ fontFamily: "Vazirmatn", fontSize: "10.5px", color: T.rust }}>⚠ موجودی منفی</span>
+                )}
               </div>
               <div className="grid grid-cols-4 gap-2 mt-2.5 text-center">
                 <div>
@@ -2177,7 +2399,8 @@ function Inventory({ data, openModal, onDeleteStockAdjustment }) {
 /* ---------------- Treasury (صندوق) ---------------- */
 const TREASURY_KIND_LABEL = { customer: "دریافتی از مشتری", supplier: "پرداخت به تامین‌کننده", person: "شریک/شخص", expense: "هزینه" };
 
-function Treasury({ data, openModal, onDeleteFeed }) {
+function Treasury({ data, openModal, onDeleteFeed, onDeletePerson }) {
+  const [confirmDeletePerson, setConfirmDeletePerson] = useState(null);
   const feed = [];
   (data.customers || []).forEach((c) =>
     (c.transactions || []).filter((t) => t.type === "payment").forEach((t) => feed.push({ ...t, direction: "in", kind: "customer", name: c.name }))
@@ -2202,10 +2425,21 @@ function Treasury({ data, openModal, onDeleteFeed }) {
 
   return (
     <div className="px-4 pt-5">
+      {confirmDeletePerson && (
+        <ConfirmDialog
+          title="حذف شخص"
+          message={`«${confirmDeletePerson.name}» و همه تراکنش‌های او برای همیشه حذف می‌شود. این کار قابل بازگشت نیست.`}
+          onCancel={() => setConfirmDeletePerson(null)}
+          onConfirm={() => {
+            onDeletePerson(confirmDeletePerson.id);
+            setConfirmDeletePerson(null);
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-extrabold" style={{ color: T.ink, fontFamily: "Vazirmatn" }}>صندوق</h1>
         <button onClick={() => openModal({ type: "treasuryTx" })} className="p-2 rounded-full" style={{ background: T.amber }}>
-          <Plus size={17} color="#fff" />
+          <Plus size={17} color={T.bg} />
         </button>
       </div>
 
@@ -2222,9 +2456,14 @@ function Treasury({ data, openModal, onDeleteFeed }) {
                       <Avatar name={p.name} size={32} />
                       <p style={{ fontFamily: "Vazirmatn", fontWeight: 700, color: T.ink, fontSize: "14px" }}>{p.name}</p>
                     </div>
-                    <div className="text-left">
-                      <Amount value={Math.abs(bal)} tone={bal > 0 ? "rust" : bal < 0 ? "green" : "muted"} size="sm" />
-                      <p style={{ fontFamily: "Vazirmatn", fontSize: "10px", color: T.muted }}>{bal > 0 ? "بدهکار شما" : bal < 0 ? "طلبکار شما" : "تسویه"}</p>
+                    <div className="flex items-center gap-3">
+                      <div className="text-left">
+                        <Amount value={Math.abs(bal)} tone={bal > 0 ? "rust" : bal < 0 ? "green" : "muted"} size="sm" />
+                        <p style={{ fontFamily: "Vazirmatn", fontSize: "10px", color: T.muted }}>{bal > 0 ? "بدهکار شما" : bal < 0 ? "طلبکار شما" : "تسویه"}</p>
+                      </div>
+                      <button onClick={() => setConfirmDeletePerson(p)} className="shrink-0">
+                        <Trash2 size={15} color={T.muted} />
+                      </button>
                     </div>
                   </div>
                 </Card>
@@ -2328,7 +2567,7 @@ function LineItemsEditor({ items, setItems, suggestions, priceLabel, qtyLabel = 
                   fontFamily: "Vazirmatn",
                   fontSize: "12.5px",
                   fontWeight: 700,
-                  color: name === s ? "#fff" : T.ink,
+                  color: name === s ? T.bg : T.ink,
                 }}
               >
                 {s}
@@ -2364,7 +2603,7 @@ function LineItemsEditor({ items, setItems, suggestions, priceLabel, qtyLabel = 
           onClick={add}
           disabled={!name.trim() || !qty || !price}
           className="w-full mt-2 py-2 rounded-lg flex items-center justify-center gap-1"
-          style={{ background: name.trim() && qty && price ? T.amber : "#2A2C33", color: "#fff" }}
+          style={{ background: name.trim() && qty && price ? T.amber : T.card2, color: name.trim() && qty && price ? T.bg : T.muted }}
         >
           <Plus size={15} />
           <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700 }}>افزودن کالا</span>
@@ -2399,37 +2638,58 @@ function FormModal({ title, onClose, onSubmit }) {
   );
 }
 
-function CustomerTxModal({ onClose, onSubmit, productSuggestions }) {
-  const [type, setType] = useState("debt");
-  const [amount, setAmount] = useState("");
-  const [items, setItems] = useState([]);
-  const [date, setDate] = useState(todayISO());
-  const [description, setDescription] = useState("");
+function CustomerTxModal({ onClose, onSubmit, productSuggestions, data, editTx }) {
+  const [type, setType] = useState(editTx?.type || "debt");
+  const [amount, setAmount] = useState(editTx && editTx.type === "payment" ? String(editTx.amount) : "");
+  const [items, setItems] = useState(editTx?.items || []);
+  const [date, setDate] = useState(editTx?.date || todayISO());
+  const [description, setDescription] = useState(editTx?.description || "");
   const [receipt, setReceipt] = useState(null);
+  const [receiptHash, setReceiptHash] = useState(editTx?.receiptHash || null);
+  const [loadingReceipt, setLoadingReceipt] = useState(!!editTx?.hasReceipt);
+  const [destination, setDestination] = useState(editTx?.directPaySupplierId ? "supplier" : "self");
+  const [directSupplierId, setDirectSupplierId] = useState(editTx?.directPaySupplierId || "");
+  const [cardId, setCardId] = useState(editTx?.cardId || "");
+
+  useEffect(() => {
+    if (editTx?.hasReceipt) {
+      loadReceipt(editTx.id).then((url) => {
+        setReceipt(url);
+        setLoadingReceipt(false);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const total = items.reduce((s, it) => s + itemSubtotal(it), 0);
-  const canSubmit = type === "debt" ? items.length > 0 : !!amount;
+  const canSubmit = type === "debt" ? items.length > 0 : !!amount && (destination === "self" || !!directSupplierId);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true);
     const tx = {
-      id: uid(),
+      id: editTx?.id || uid(),
       type,
       amount: type === "debt" ? total : Number(amount),
       date,
-      createdAt: new Date().toISOString(),
+      createdAt: editTx?.createdAt || new Date().toISOString(),
       description: description.trim(),
       hasReceipt: !!receipt,
-      _receiptData: receipt,
+      _receiptData: receipt && receipt.startsWith("data:") ? receipt : undefined,
+      receiptHash: receiptHash || null,
+      linkedSupplierTxId: editTx?.linkedSupplierTxId || null,
     };
     if (type === "debt") tx.items = items;
+    if (type === "payment") {
+      tx.directPaySupplierId = destination === "supplier" ? directSupplierId : null;
+      tx.cardId = destination === "self" ? cardId || null : null;
+    }
     await onSubmit(tx);
   };
 
   return (
-    <Modal title="ثبت تراکنش مشتری" onClose={onClose}>
+    <Modal title={editTx ? "ویرایش تراکنش" : "ثبت تراکنش مشتری"} onClose={onClose}>
       <div className="flex gap-2 mb-4">
         <button onClick={() => setType("debt")} className="flex-1 py-2.5 rounded-xl" style={{ background: type === "debt" ? T.rust : T.rustBg }}>
           <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: type === "debt" ? "#fff" : T.rust }}>تحویل جنس</span>
@@ -2449,9 +2709,43 @@ function CustomerTxModal({ onClose, onSubmit, productSuggestions }) {
           />
         </Field>
       ) : (
-        <Field label="مبلغ (تومان)">
-          <AmountInput value={amount} onChange={setAmount} />
-        </Field>
+        <>
+          <Field label="مبلغ (تومان)">
+            <AmountInput value={amount} onChange={setAmount} />
+          </Field>
+          <Field label="این وجه کجا رفت؟">
+            <div className="flex gap-2 mb-2">
+              <button onClick={() => setDestination("self")} className="flex-1 py-2 rounded-xl" style={{ background: destination === "self" ? T.amber : T.card, border: `1px solid ${T.hairline}` }}>
+                <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: destination === "self" ? T.bg : T.ink }}>به حساب خودم</span>
+              </button>
+              <button onClick={() => setDestination("supplier")} className="flex-1 py-2 rounded-xl" style={{ background: destination === "supplier" ? T.amber : T.card, border: `1px solid ${T.hairline}` }}>
+                <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: destination === "supplier" ? T.bg : T.ink }}>مستقیم به تامین‌کننده</span>
+              </button>
+            </div>
+            {destination === "supplier" ? (
+              <>
+                <select value={directSupplierId} onChange={(e) => setDirectSupplierId(e.target.value)} style={inputStyle}>
+                  <option value="">کدام تامین‌کننده؟</option>
+                  {data.suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs" style={{ fontFamily: "Vazirmatn", color: T.muted, lineHeight: 1.8 }}>
+                  این مبلغ هم از بدهی این مشتری کم میشه، هم به‌عنوان پرداخت به همون تامین‌کننده ثبت میشه.
+                </p>
+              </>
+            ) : (
+              data.cards.length > 0 && (
+                <select value={cardId} onChange={(e) => setCardId(e.target.value)} style={inputStyle}>
+                  <option value="">کارت مقصد (اختیاری)</option>
+                  {data.cards.map((c) => (
+                    <option key={c.id} value={c.id}>{c.bankName}{c.holderName ? " — " + c.holderName : ""}</option>
+                  ))}
+                </select>
+              )
+            )}
+          </Field>
+        </>
       )}
 
       <Field label="تاریخ">
@@ -2461,44 +2755,71 @@ function CustomerTxModal({ onClose, onSubmit, productSuggestions }) {
         <TextArea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="توضیح اضافه‌ای اگر لازمه" />
       </Field>
       <Field label="رسید">
-        <ReceiptPicker value={receipt} onChange={setReceipt} />
+        {loadingReceipt ? (
+          <p className="flex items-center gap-1.5" style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: T.muted }}>
+            <Loader2 size={13} className="animate-spin" /> در حال بارگذاری رسید قبلی...
+          </p>
+        ) : (
+          <ReceiptField value={receipt} onChange={setReceipt} data={data} excludeTxId={editTx?.id} onHashChange={setReceiptHash} />
+        )}
       </Field>
-      <PrimaryButton disabled={!canSubmit || busy} onClick={submit}>{busy ? "در حال ذخیره..." : "ذخیره تراکنش"}</PrimaryButton>
+      <PrimaryButton disabled={!canSubmit || busy} onClick={submit}>{busy ? "در حال ذخیره..." : editTx ? "ذخیره ویرایش" : "ذخیره تراکنش"}</PrimaryButton>
     </Modal>
   );
 }
 
-function SupplierTxModal({ supplier, onClose, onSubmit, onAddShippingCost, productSuggestions }) {
-  const [type, setType] = useState("purchase");
-  const [amount, setAmount] = useState("");
-  const [items, setItems] = useState([]);
-  const [date, setDate] = useState(todayISO());
-  const [description, setDescription] = useState("");
+function SupplierTxModal({ supplier, onClose, onSubmit, onAddShippingCost, productSuggestions, data, editTx }) {
+  const [type, setType] = useState(editTx?.type || "purchase");
+  const [amount, setAmount] = useState(editTx && editTx.type === "payment" ? String(editTx.amount) : "");
+  const [items, setItems] = useState(editTx?.items || []);
+  const [date, setDate] = useState(editTx?.date || todayISO());
+  const [description, setDescription] = useState(editTx?.description || "");
   const [receipt, setReceipt] = useState(null);
+  const [receiptHash, setReceiptHash] = useState(editTx?.receiptHash || null);
+  const [loadingReceipt, setLoadingReceipt] = useState(!!editTx?.hasReceipt);
+  const [source, setSource] = useState(editTx?.directPayCustomerId ? "customer" : "self");
+  const [directCustomerId, setDirectCustomerId] = useState(editTx?.directPayCustomerId || "");
+  const [cardId, setCardId] = useState(editTx?.cardId || "");
+
+  useEffect(() => {
+    if (editTx?.hasReceipt) {
+      loadReceipt(editTx.id).then((url) => {
+        setReceipt(url);
+        setLoadingReceipt(false);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const total = items.reduce((s, it) => s + itemSubtotal(it), 0);
-  const canSubmit = type === "purchase" ? items.length > 0 : !!amount;
+  const canSubmit = type === "purchase" ? items.length > 0 : !!amount && (source === "self" || !!directCustomerId);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true);
     const tx = {
-      id: uid(),
+      id: editTx?.id || uid(),
       type,
       amount: type === "purchase" ? total : Number(amount),
       date,
-      createdAt: new Date().toISOString(),
+      createdAt: editTx?.createdAt || new Date().toISOString(),
       description: description.trim(),
       hasReceipt: !!receipt,
-      _receiptData: receipt,
+      _receiptData: receipt && receipt.startsWith("data:") ? receipt : undefined,
+      receiptHash: receiptHash || null,
+      linkedCustomerTxId: editTx?.linkedCustomerTxId || null,
     };
     if (type === "purchase") tx.items = items;
+    if (type === "payment") {
+      tx.directPayCustomerId = source === "customer" ? directCustomerId : null;
+      tx.cardId = source === "self" ? cardId || null : null;
+    }
     await onSubmit(tx);
   };
 
   return (
-    <Modal title="ثبت تراکنش تامین‌کننده" onClose={onClose}>
+    <Modal title={editTx ? "ویرایش تراکنش" : "ثبت تراکنش تامین‌کننده"} onClose={onClose}>
       <div className="grid grid-cols-2 gap-2 mb-4">
         <button onClick={() => setType("purchase")} className="py-2.5 rounded-xl" style={{ background: type === "purchase" ? T.rust : T.rustBg }}>
           <span style={{ fontFamily: "Vazirmatn", fontSize: "13px", fontWeight: 700, color: type === "purchase" ? "#fff" : T.rust }}>خرید کالا</span>
@@ -2508,17 +2829,19 @@ function SupplierTxModal({ supplier, onClose, onSubmit, onAddShippingCost, produ
         </button>
       </div>
 
-      <button
-        onClick={() => {
-          onClose();
-          onAddShippingCost();
-        }}
-        className="w-full flex items-center justify-between px-4 py-3 rounded-xl mb-4"
-        style={{ background: T.amberBg }}
-      >
-        <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: T.amberDark }}>+ ثبت هزینه حمل یا جانبی برای این تامین‌کننده</span>
-        <ChevronLeft size={15} color={T.amberDark} style={{ transform: "rotate(180deg)" }} />
-      </button>
+      {!editTx && (
+        <button
+          onClick={() => {
+            onClose();
+            onAddShippingCost();
+          }}
+          className="w-full flex items-center justify-between px-4 py-3 rounded-xl mb-4"
+          style={{ background: "rgba(201,167,104,0.12)" }}
+        >
+          <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: T.amberDark }}>+ ثبت هزینه حمل یا جانبی برای این تامین‌کننده</span>
+          <ChevronLeft size={15} color={T.amberDark} style={{ transform: "rotate(180deg)" }} />
+        </button>
+      )}
 
       {type === "purchase" ? (
         <Field label="کالاها">
@@ -2530,9 +2853,43 @@ function SupplierTxModal({ supplier, onClose, onSubmit, onAddShippingCost, produ
           />
         </Field>
       ) : (
-        <Field label="مبلغ (تومان)">
-          <AmountInput value={amount} onChange={setAmount} />
-        </Field>
+        <>
+          <Field label="مبلغ (تومان)">
+            <AmountInput value={amount} onChange={setAmount} />
+          </Field>
+          <Field label="این وجه از کجا پرداخت شد؟">
+            <div className="flex gap-2 mb-2">
+              <button onClick={() => setSource("self")} className="flex-1 py-2 rounded-xl" style={{ background: source === "self" ? T.amber : T.card, border: `1px solid ${T.hairline}` }}>
+                <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: source === "self" ? T.bg : T.ink }}>از حساب خودم</span>
+              </button>
+              <button onClick={() => setSource("customer")} className="flex-1 py-2 rounded-xl" style={{ background: source === "customer" ? T.amber : T.card, border: `1px solid ${T.hairline}` }}>
+                <span style={{ fontFamily: "Vazirmatn", fontSize: "12.5px", fontWeight: 700, color: source === "customer" ? T.bg : T.ink }}>مستقیم توسط مشتری</span>
+              </button>
+            </div>
+            {source === "customer" ? (
+              <>
+                <select value={directCustomerId} onChange={(e) => setDirectCustomerId(e.target.value)} style={inputStyle}>
+                  <option value="">کدام مشتری؟</option>
+                  {data.customers.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs" style={{ fontFamily: "Vazirmatn", color: T.muted, lineHeight: 1.8 }}>
+                  این مبلغ هم از بدهی شما به این تامین‌کننده کم میشه، هم به‌عنوان دریافتی از همون مشتری ثبت میشه.
+                </p>
+              </>
+            ) : (
+              data.cards.length > 0 && (
+                <select value={cardId} onChange={(e) => setCardId(e.target.value)} style={inputStyle}>
+                  <option value="">کارت مبدأ (اختیاری)</option>
+                  {data.cards.map((c) => (
+                    <option key={c.id} value={c.id}>{c.bankName}{c.holderName ? " — " + c.holderName : ""}</option>
+                  ))}
+                </select>
+              )
+            )}
+          </Field>
+        </>
       )}
 
       <Field label="تاریخ">
@@ -2542,9 +2899,15 @@ function SupplierTxModal({ supplier, onClose, onSubmit, onAddShippingCost, produ
         <TextArea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثلاً: خرید محموله جدید از تامین‌کننده" />
       </Field>
       <Field label="رسید">
-        <ReceiptPicker value={receipt} onChange={setReceipt} />
+        {loadingReceipt ? (
+          <p className="flex items-center gap-1.5" style={{ fontFamily: "Vazirmatn", fontSize: "12px", color: T.muted }}>
+            <Loader2 size={13} className="animate-spin" /> در حال بارگذاری رسید قبلی...
+          </p>
+        ) : (
+          <ReceiptField value={receipt} onChange={setReceipt} data={data} excludeTxId={editTx?.id} onHashChange={setReceiptHash} />
+        )}
       </Field>
-      <PrimaryButton disabled={!canSubmit || busy} onClick={submit}>{busy ? "در حال ذخیره..." : "ذخیره تراکنش"}</PrimaryButton>
+      <PrimaryButton disabled={!canSubmit || busy} onClick={submit}>{busy ? "در حال ذخیره..." : editTx ? "ذخیره ویرایش" : "ذخیره تراکنش"}</PrimaryButton>
     </Modal>
   );
 }
@@ -2664,7 +3027,7 @@ function StockAdjustmentModal({ onClose, onSubmit, productSuggestions }) {
                   fontFamily: "Vazirmatn",
                   fontSize: "12.5px",
                   fontWeight: 700,
-                  color: productName === s ? "#fff" : T.ink,
+                  color: productName === s ? T.bg : T.ink,
                 }}
               >
                 {s}
@@ -2734,6 +3097,7 @@ function TreasuryTxModal({ data, onClose, onSubmit, initial }) {
   const [date, setDate] = useState(todayISO());
   const [description, setDescription] = useState("");
   const [receipt, setReceipt] = useState(null);
+  const [receiptHash, setReceiptHash] = useState(null);
 
   const lockSupplier = !!initial?.lockSupplier;
 
@@ -2762,7 +3126,7 @@ function TreasuryTxModal({ data, onClose, onSubmit, initial }) {
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true);
-    const base = { id: uid(), amount: Number(amount), date, createdAt: new Date().toISOString(), description: description.trim(), hasReceipt: !!receipt, _receiptData: receipt };
+    const base = { id: uid(), amount: Number(amount), date, createdAt: new Date().toISOString(), description: description.trim(), hasReceipt: !!receipt, _receiptData: receipt, receiptHash: receiptHash || null };
     if (about === "customer") await onSubmit({ kind: "customer", targetId: customerId, tx: { ...base, type: "payment" } });
     else if (about === "supplier") await onSubmit({ kind: "supplier", targetId: supplierId, tx: { ...base, type: "payment" } });
     else if (about === "person")
@@ -2899,7 +3263,7 @@ function TreasuryTxModal({ data, onClose, onSubmit, initial }) {
         <TextArea value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
       <Field label="رسید">
-        <ReceiptPicker value={receipt} onChange={setReceipt} />
+        <ReceiptField value={receipt} onChange={setReceipt} data={data} onHashChange={setReceiptHash} />
       </Field>
       <PrimaryButton disabled={!canSubmit || busy} onClick={submit}>{busy ? "در حال ذخیره..." : "ذخیره تراکنش"}</PrimaryButton>
     </Modal>
