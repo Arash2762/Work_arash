@@ -1,8 +1,0 @@
-{
-  "name": "دفتر حساب مشترک",
-  "short_name": "دفتر حساب",
-  "start_url": "/",
-  "display": "standalone",
-  "background_color": "#0B0C10",
-  "theme_color": "#0B0C10"
-}
